@@ -1,14 +1,18 @@
 // api/sales.js — Jembatan read-only untuk SALES TRACKER.
 // Prinsip keamanan (WAJIB): SCOPE + PROJECTION di sisi server.
-//   SCOPE      : hanya mengambil sale.order milik salesperson pemilik token (user_id = dia).
+//   SCOPE      : hanya mengambil sale.order milik SATU sales (berdasar kolom "Salesman").
 //   PROJECTION : hanya mengembalikan field STATUS yang di-allowlist.
 // TIDAK PERNAH mengembalikan: nilai penjualan, biaya/modal, rute, order sales lain.
 //
+// Sales TIDAK perlu akun Odoo. Pemisahan dibaca dari kolom "Salesman" di sale.order
+// (field khusus, sama yang dipakai RuteKirim — dideteksi otomatis dari label "Salesman").
+//
 // ENV VARS di Vercel (project SalesTracker):
-//   ODOO_URL, ODOO_DB, ODOO_USER, ODOO_KEY   -> sama seperti RuteKirim (user read-only sudah cukup)
-//   SALES_REPS = JSON daftar rep. Contoh:
-//     [{"token":"pebri-9x2f","nama":"Pebrianto","email":"pebrianto@tataraya.com"},
-//      {"token":"eko-7k4d","nama":"Eko","uid":15}]
+//   ODOO_URL, ODOO_DB, ODOO_USER, ODOO_KEY   -> sama seperti RuteKirim (user read-only cukup)
+//   SALES_REPS = JSON daftar sales. Petakan tiap sales ke nilai kolom "Salesman" Odoo:
+//     [{"token":"novan-4k2p","nama":"Novan","salesman":"NOVAN"},
+//      {"token":"wawan-8m3x","nama":"Wawan","salesman":"WAWAN"}]
+//     (Alternatif kalau sales KEBETULAN user Odoo: pakai "uid":15 atau "email":"...".)
 //   SALES_SLA_DAYS = target hari PO -> Diterima (default 7). Lewat itu = TELAT.
 
 const ODOO_URL  = process.env.ODOO_URL;
@@ -20,6 +24,8 @@ const SLA_DAYS  = Number(process.env.SALES_SLA_DAYS || 7);
 function reps() {
   try { return JSON.parse(process.env.SALES_REPS || "[]"); } catch { return []; }
 }
+const norm = (x) => String(x || "").trim().toLowerCase();
+const namaField = (v) => (Array.isArray(v) ? (v[1] || "") : (v || "")); // many2one [id,nama] atau scalar
 
 async function rpc(service, method, args) {
   const r = await fetch(`${ODOO_URL}/jsonrpc`, {
@@ -44,36 +50,61 @@ export default async function handler(req, res) {
     if (!ODOO_URL || !ODOO_DB || !ODOO_USER || !ODOO_KEY)
       return res.status(500).json({ error: "Konfigurasi Odoo (ODOO_URL/DB/USER/KEY) belum lengkap di Vercel." });
 
-    // 2) Auth Odoo (pakai satu integration user)
+    // 2) Auth Odoo (satu integration user)
     const uid = await rpc("common", "authenticate", [ODOO_DB, ODOO_USER, ODOO_KEY, {}]);
     if (!uid) return res.status(401).json({ error: "Login Odoo ditolak. Cek ODOO_USER / ODOO_KEY di Vercel." });
     const exec = (model, method, params, kwargs = {}) =>
       rpc("object", "execute_kw", [ODOO_DB, uid, ODOO_KEY, model, method, params, kwargs]);
 
-    // 3) Petakan rep -> user_id Odoo (salesperson)
-    let spUid = rep.uid || null;
-    if (!spUid && (rep.email || rep.login)) {
-      const u = await exec("res.users", "search_read", [[["login", "=", rep.email || rep.login]]], { fields: ["id"], limit: 1 });
-      spUid = u.length ? u[0].id : null;
-    }
-    if (!spUid && rep.nama) {
-      const u = await exec("res.users", "search_read", [[["name", "=", rep.nama]]], { fields: ["id"], limit: 1 });
-      spUid = u.length ? u[0].id : null;
-    }
-    if (!spUid)
-      return res.status(500).json({ error: "Salesperson belum bisa dipetakan ke user Odoo. Isi uid / email / nama yang benar di SALES_REPS." });
+    // 3) Deteksi kolom "Salesman" otomatis (sama seperti RuteKirim)
+    let salesmanKey = "";
+    try {
+      const fg = await exec("sale.order", "fields_get", [[], ["string", "type"]]);
+      salesmanKey = Object.keys(fg).find((k) => norm(fg[k].string) === "salesman")
+                 || Object.keys(fg).find((k) => norm(fg[k].string).includes("salesman")) || "";
+    } catch {}
 
-    // 4) SCOPE: hanya order milik rep ini
-    const dom = [["user_id", "=", spUid], ["state", "in", ["sale", "done"]]];
-    const orders = await exec("sale.order", "search_read", [dom], {
-      fields: ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state"],
-      order: "date_order desc",
-      limit: 300,
-    });
+    // 4) Tentukan MODE scoping
+    //    (a) mode "salesman": rep punya nilai salesman -> filter kolom Salesman.
+    //    (b) mode "user": rep punya uid/email -> filter user_id (kalau sales kebetulan user Odoo).
+    const baseState = ["state", "in", ["sale", "done"]];
+    let dom, mode = "";
+    if (rep.salesman) {
+      if (!salesmanKey)
+        return res.status(500).json({ error: "Kolom 'Salesman' tidak ditemukan di Odoo. Pastikan field bernama/berlabel 'Salesman' ada di sale.order." });
+      mode = "salesman";
+      dom = [[salesmanKey, "ilike", rep.salesman], baseState];
+    } else {
+      let spUid = rep.uid || null;
+      if (!spUid && (rep.email || rep.login)) {
+        const u = await exec("res.users", "search_read", [[["login", "=", rep.email || rep.login]]], { fields: ["id"], limit: 1 });
+        spUid = u.length ? u[0].id : null;
+      }
+      if (!spUid && rep.nama) {
+        const u = await exec("res.users", "search_read", [[["name", "=", rep.nama]]], { fields: ["id"], limit: 1 });
+        spUid = u.length ? u[0].id : null;
+      }
+      if (!spUid)
+        return res.status(500).json({ error: "Sales belum bisa dipetakan. Isi 'salesman' (nilai kolom Salesman di Odoo), atau 'uid'/'email' jika sales adalah user Odoo." });
+      mode = "user";
+      dom = [["user_id", "=", spUid], baseState];
+    }
+
+    // 5) Ambil order (SCOPE)
+    const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state"];
+    if (mode === "salesman") flds.push(salesmanKey);
+    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: 400 });
+
+    // mode salesman: 'ilike' bisa kepanggil mirip -> saring EXACT (case-insensitive)
+    if (mode === "salesman") {
+      const target = norm(rep.salesman);
+      orders = orders.filter((o) => norm(namaField(o[salesmanKey])) === target);
+    }
+
     if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, orders: [] });
     const ids = orders.map((o) => o.id);
 
-    // 5) (opsional) field jadwal custom dari writeback RuteKirim (kalau sudah dibuat via Studio)
+    // 6) (opsional) field jadwal custom dari writeback RuteKirim (Fase 2)
     let hasSched = false;
     try {
       const fg = await exec("sale.order", "fields_get", [[], ["type"]]);
@@ -87,7 +118,7 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    // 6) Rasio item terkirim (dari baris order)
+    // 7) Rasio item terkirim
     const lineMap = {};
     try {
       const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids]]], {
@@ -104,7 +135,7 @@ export default async function handler(req, res) {
       });
     } catch {}
 
-    // 7) Reservasi stok -> tahap "Barang Disiapkan"
+    // 8) Reservasi stok -> "Barang Disiapkan"
     const siapMap = {};
     try {
       const picks = await exec("stock.picking", "search_read", [[
@@ -133,10 +164,9 @@ export default async function handler(req, res) {
       }
     } catch {}
 
-    // 8) Hitung tahap
+    // 9) Tahap
     const now = Date.now();
     const hari = (d) => (d ? Math.max(0, Math.floor((now - new Date(d).getTime()) / 86400000)) : 0);
-
     const stageOf = (o) => {
       const ds = o.delivery_status;
       if (ds === "full") return { key: 6, label: "Diterima Customer" };
@@ -148,7 +178,7 @@ export default async function handler(req, res) {
       return { key: 2, label: "Diproses" };
     };
 
-    // 9) PROJECTION: hanya field aman yang keluar
+    // 10) PROJECTION: hanya field aman
     const out = orders.map((o) => {
       const st = stageOf(o);
       const lm = lineMap[o.id];
@@ -169,9 +199,7 @@ export default async function handler(req, res) {
       };
     });
 
-    // Ringkas: sembunyikan order lama yang sudah selesai (>21 hari)
     const bersih = out.filter((o) => !(o.stage >= 6 && o.aging > 21));
-
     return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, orders: bersih });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
