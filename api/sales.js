@@ -104,17 +104,22 @@ export default async function handler(req, res) {
     if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, orders: [] });
     const ids = orders.map((o) => o.id);
 
-    // 6) (opsional) field jadwal custom dari writeback RuteKirim (Fase 2)
-    let hasSched = false;
+    // 6) Field "Jadwal Kirim" (x_studio_jadwal_kirim) - diisi routing staff via RuteKirim (Fase 2)
+    let schedKey = "";
     try {
-      const fg = await exec("sale.order", "fields_get", [[], ["type"]]);
-      hasSched = !!fg["x_scheduled_delivery"];
+      const fg = await exec("sale.order", "fields_get", [[], ["string", "type"]]);
+      const nz = (x) => String(x || "").trim().toLowerCase();
+      schedKey = fg["x_studio_jadwal_kirim"] ? "x_studio_jadwal_kirim"
+               : (Object.keys(fg).find((k) => nz(fg[k].string) === "jadwal kirim")
+               || Object.keys(fg).find((k) => k.startsWith("x_studio_jadwal"))
+               || (fg["x_scheduled_delivery"] ? "x_scheduled_delivery" : "")) || "";
     } catch {}
+    const hasSched = !!schedKey;
     let schedMap = {};
     if (hasSched) {
       try {
-        const s = await exec("sale.order", "read", [ids], { fields: ["id", "x_scheduled_delivery"] });
-        schedMap = Object.fromEntries(s.map((o) => [o.id, o.x_scheduled_delivery || ""]));
+        const s = await exec("sale.order", "read", [ids], { fields: ["id", schedKey] });
+        schedMap = Object.fromEntries(s.map((o) => [o.id, o[schedKey] || ""]));
       } catch {}
     }
 
