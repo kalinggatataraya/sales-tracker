@@ -91,7 +91,7 @@ export default async function handler(req, res) {
     }
 
     // 5) Ambil order (SCOPE)
-    const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state"];
+    const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state", "tag_ids"];
     if (mode === "salesman") flds.push(salesmanKey);
     let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: 400 });
 
@@ -163,11 +163,38 @@ export default async function handler(req, res) {
           const pid = (m.picking_id || [])[0];
           const oid = pickToOrder[pid];
           if (!oid) return;
-          const s = siapMap[oid] || (siapMap[oid] = { any: false });
-          if (m.state === "assigned" || m.state === "partially_available") s.any = true;
+          const s = siapMap[oid] || (siapMap[oid] = { tot: 0, asg: 0, part: 0 });
+          s.tot++;
+          if (m.state === "assigned") s.asg++;
+          else if (m.state === "partially_available") s.part++;
         });
       }
     } catch {}
+
+    // 8b) Tag "GAGAL KIRIM" (ditulis RuteKirim saat pengiriman gagal) -> alasan utk sales
+    const gagalMap = {};
+    try {
+      const tset = new Set();
+      orders.forEach((o) => (o.tag_ids || []).forEach((t) => tset.add(t)));
+      if (tset.size) {
+        const tags = await exec("crm.tag", "read", [[...tset]], { fields: ["id", "name"] });
+        const tmap = Object.fromEntries(tags.map((t) => [t.id, t.name || ""]));
+        orders.forEach((o) => {
+          const nm = (o.tag_ids || []).map((id) => tmap[id] || "").find((x) => /^gagal kirim/i.test(x));
+          if (nm) gagalMap[o.id] = { alasan: nm.replace(/^gagal kirim\s*-?\s*/i, "").trim() };
+        });
+      }
+    } catch {}
+
+    // Kesiapan stok: "ada" (ter-reserve penuh) / "sebagian" / "belum" (belum ada reservasi) / "" (sedang/sudah dikirim -> tak relevan)
+    const stokState = (o, stageKey) => {
+      if (stageKey >= 5 || o.delivery_status === "full") return "";
+      const s = siapMap[o.id];
+      if (!s || s.tot === 0) return "belum";
+      if (s.asg >= s.tot) return "ada";
+      if (s.asg + s.part > 0) return "sebagian";
+      return "belum";
+    };
 
     // 9) Tahap
     const now = Date.now();
@@ -179,7 +206,7 @@ export default async function handler(req, res) {
       const partial = ds === "partial" || (lm && lm.done > 0 && lm.done < lm.tot);
       if (ds === "partial" || ds === "started") return { key: 5, label: partial ? "Sebagian Terkirim" : "Dalam Pengiriman" };
       if (hasSched && schedMap[o.id]) return { key: 4, label: "Dijadwalkan Kirim" };
-      if (siapMap[o.id] && siapMap[o.id].any) return { key: 3, label: "Barang Disiapkan" };
+      if (siapMap[o.id] && (siapMap[o.id].asg + siapMap[o.id].part) > 0) return { key: 3, label: "Barang Disiapkan" };
       return { key: 2, label: "Diproses" };
     };
 
@@ -189,6 +216,9 @@ export default async function handler(req, res) {
       const lm = lineMap[o.id];
       const aging = hari(o.date_order);
       const delivered = st.key >= 6;
+      const g = gagalMap[o.id];
+      const gagal = !!g && st.key <= 4;          // tampilkan hanya bila belum dikirim/selesai
+      const stok = stokState(o, st.key);          // "ada" | "sebagian" | "belum" | ""
       return {
         po: o.name,
         ref: o.client_order_ref || "",
@@ -199,6 +229,10 @@ export default async function handler(req, res) {
         overdue: !delivered && aging > SLA_DAYS,
         scheduled: hasSched ? (schedMap[o.id] || "") : "",
         delivered,
+        gagal,
+        gagalAlasan: gagal ? (g.alasan || "") : "",
+        stok,
+        belumReady: stok === "belum" && !gagal,
         tanggalPO: o.date_order || "",
         partial: lm && lm.tot ? { done: lm.done, tot: lm.tot } : null,
       };
