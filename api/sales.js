@@ -96,7 +96,7 @@ export default async function handler(req, res) {
     // 5) Ambil order (SCOPE)
     const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state", "tag_ids"];
     if ((mode === "salesman" || mode === "manager") && salesmanKey) flds.push(salesmanKey);
-    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: mode === "manager" ? 1200 : 400 });
+    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: mode === "manager" ? 600 : 400 });
 
     // mode salesman: 'ilike' bisa kepanggil mirip -> saring EXACT (case-insensitive)
     if (mode === "salesman") {
@@ -129,10 +129,17 @@ export default async function handler(req, res) {
     // 7) Rasio item terkirim
     const lineMap = {};
     const itemMap = {};
+    // Deteksi field satuan (UoM) di sale.order.line. Odoo 19 = "product_uom_id"; versi lama = "product_uom".
+    let uomKey = "";
     try {
-      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids], ["display_type", "=", false]]], {
-        fields: ["order_id", "product_id", "product_uom", "product_uom_qty", "qty_delivered"],
-      });
+      const lf = await exec("sale.order.line", "fields_get", [[], ["type", "relation"]]);
+      uomKey = ["product_uom_id", "product_uom"].find((k) => lf[k])
+            || Object.keys(lf).find((k) => lf[k] && lf[k].relation === "uom.uom" && lf[k].type === "many2one") || "";
+    } catch {}
+    try {
+      const flds = ["order_id", "product_id", "product_uom_qty", "qty_delivered"];
+      if (uomKey) flds.push(uomKey);
+      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids], ["display_type", "=", false]]], { fields: flds });
       lines.forEach((l) => {
         const oid = (l.order_id || [])[0];
         if (!oid) return;
@@ -143,7 +150,7 @@ export default async function handler(req, res) {
         const terkirim = l.qty_delivered || 0;
         if (terkirim >= qty) m.done++;
         const nama = String((l.product_id || [])[1] || "").replace(/^\[[^\]]*\]\s*/, "").trim();
-        const sat = String((l.product_uom || [])[1] || "").trim();
+        const sat = uomKey ? String((l[uomKey] || [])[1] || "").trim() : "";
         (itemMap[oid] || (itemMap[oid] = [])).push({ nama, qty, terkirim, sat });
       });
     } catch {}
