@@ -94,6 +94,11 @@ function OrderCard({ o, onOpen }) {
       <div style={{ fontSize: 12, color: T.muted, marginTop: 1 }}>
         {o.po}{o.ref ? ` · PO: ${o.ref}` : ""}
       </div>
+      {o.salesman && (
+        <div style={{ display: "inline-block", marginTop: 5, fontSize: 11, fontWeight: 700, color: T.primary, background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 20, padding: "2px 9px" }}>
+          {o.salesman}
+        </div>
+      )}
 
       <Stepper stage={o.stage} />
 
@@ -114,6 +119,16 @@ function OrderCard({ o, onOpen }) {
           </span>
         )}
       </div>
+
+      {o.items && o.items.length > 0 && (() => {
+        const kirim = o.items.filter((it) => it.terkirim >= it.qty).length;
+        const siap = o.items.length - kirim;
+        return (
+          <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>
+            📦 {kirim} terkirim · {siap} disiapkan
+          </div>
+        );
+      })()}
 
       {o.gagal ? (
         <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "#fef2f2", border: "1px solid #fecaca", color: T.danger, borderRadius: 9, padding: "6px 9px", fontSize: 12.5, fontWeight: 700 }}>
@@ -159,6 +174,7 @@ function Detail({ o, onClose, onToast }) {
           <div>
             <div style={{ fontWeight: 800, fontSize: 16 }}>{o.customer}</div>
             <div style={{ fontSize: 12, color: T.muted }}>{o.po}{o.ref ? ` · PO: ${o.ref}` : ""}</div>
+            {o.salesman && <div style={{ fontSize: 12, color: T.primary, fontWeight: 700, marginTop: 1 }}>Sales: {o.salesman}</div>}
           </div>
         </div>
 
@@ -223,6 +239,35 @@ function Detail({ o, onClose, onToast }) {
           })}
         </div>
 
+        {o.items && o.items.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 8 }}>Rincian Barang</div>
+            {o.items.map((it, i) => {
+              const penuh = it.terkirim >= it.qty;
+              const sebagian = it.terkirim > 0 && it.terkirim < it.qty;
+              const stCol = penuh ? T.ok : sebagian ? T.warn : T.primary;
+              const stLbl = penuh ? "Terkirim" : sebagian ? `Sebagian ${it.terkirim}/${it.qty}` : "Disiapkan";
+              const StIco = penuh ? CheckCircle2 : sebagian ? Truck : Package;
+              const bg = penuh ? "#f0fdf4" : sebagian ? "#fffbeb" : "#eff6ff";
+              const bd = penuh ? "#bbf7d0" : sebagian ? "#fde68a" : "#bfdbfe";
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 11px", marginBottom: 7 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text, lineHeight: 1.3 }}>{it.nama || "\u2014"}</div>
+                    <div style={{ fontSize: 11.5, color: T.muted, marginTop: 1 }}>{it.qty}{it.sat ? " " + it.sat : ""}{it.terkirim > 0 && it.terkirim < it.qty ? ` \u00b7 terkirim ${it.terkirim}` : ""}</div>
+                  </div>
+                  <span style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: stCol, background: bg, border: `1px solid ${bd}`, borderRadius: 20, padding: "4px 9px" }}>
+                    <StIco size={13} /> {stLbl}
+                  </span>
+                </div>
+              );
+            })}
+            <div style={{ fontSize: 11, color: T.muted, marginTop: 2, lineHeight: 1.4 }}>
+              Terkirim = sudah dikirim ke customer · Disiapkan = sedang diproses gudang
+            </div>
+          </div>
+        )}
+
         <button onClick={salin} style={{
           width: "100%", marginTop: 16, background: T.primary, color: "#fff", border: "none",
           borderRadius: 12, padding: "13px 14px", fontSize: 14.5, fontWeight: 700, cursor: "pointer",
@@ -248,6 +293,7 @@ export default function SalesTracker() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState("semua");
+  const [salesFilter, setSalesFilter] = useState("semua");
   const [q, setQ] = useState("");
   const [detail, setDetail] = useState(null);
   const [toast, setToast] = useState("");
@@ -294,8 +340,14 @@ export default function SalesTracker() {
     kirim: orders.filter((o) => o.stage === 5).length,
   }), [orders]);
 
+  const salesmen = useMemo(() => {
+    if (!data?.manager) return [];
+    return [...new Set(orders.map((o) => o.salesman).filter(Boolean))].sort();
+  }, [orders, data]);
+
   const terfilter = useMemo(() => {
     let list = orders;
+    if (data?.manager && salesFilter !== "semua") list = list.filter((o) => o.salesman === salesFilter);
     if (filter === "telat") list = list.filter((o) => o.overdue);
     else if (filter === "gagal") list = list.filter((o) => o.gagal);
     else if (filter === "belum") list = list.filter((o) => o.belumReady);
@@ -307,7 +359,7 @@ export default function SalesTracker() {
       list = list.filter((o) => (o.customer + " " + o.po + " " + o.ref).toLowerCase().includes(s));
     }
     return [...list].sort((a, b) => (Number(!!b.gagal) - Number(!!a.gagal)) || (Number(!!b.belumReady) - Number(!!a.belumReady)) || (b.overdue - a.overdue) || (a.stage - b.stage) || (b.aging - a.aging));
-  }, [orders, filter, q]);
+  }, [orders, filter, q, salesFilter, data]);
 
   /* ---- Layar login ---- */
   if (!token) {
@@ -352,7 +404,7 @@ export default function SalesTracker() {
             SALES TRACKER
           </div>
           <div style={{ fontSize: 12, color: T.muted }}>
-            {data?.rep ? `Hai, ${data.rep}` : "Pesanan Saya"}
+            {data?.manager ? "Manajerial · semua sales" : data?.rep ? `Hai, ${data.rep}` : "Pesanan Saya"}
           </div>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
@@ -384,6 +436,17 @@ export default function SalesTracker() {
             </div>
           ))}
         </div>
+
+        {/* Filter sales (manajerial) */}
+        {data?.manager && salesmen.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <select value={salesFilter} onChange={(e) => setSalesFilter(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", fontSize: 14, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, outline: "none", fontFamily: "inherit", fontWeight: 600 }}>
+              <option value="semua">Semua sales ({orders.length})</option>
+              {salesmen.map((sm) => <option key={sm} value={sm}>{sm}</option>)}
+            </select>
+          </div>
+        )}
 
         {/* Cari */}
         <div style={{ position: "relative", marginBottom: 10 }}>
