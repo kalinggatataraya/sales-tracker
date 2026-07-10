@@ -69,7 +69,10 @@ export default async function handler(req, res) {
     //    (b) mode "user": rep punya uid/email -> filter user_id (kalau sales kebetulan user Odoo).
     const baseState = ["state", "in", ["sale", "done"]];
     let dom, mode = "";
-    if (rep.salesman) {
+    if (rep.role === "manager" || rep.all === true) {
+      mode = "manager";
+      dom = [baseState];
+    } else if (rep.salesman) {
       if (!salesmanKey)
         return res.status(500).json({ error: "Kolom 'Salesman' tidak ditemukan di Odoo. Pastikan field bernama/berlabel 'Salesman' ada di sale.order." });
       mode = "salesman";
@@ -92,8 +95,8 @@ export default async function handler(req, res) {
 
     // 5) Ambil order (SCOPE)
     const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state", "tag_ids"];
-    if (mode === "salesman") flds.push(salesmanKey);
-    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: 400 });
+    if ((mode === "salesman" || mode === "manager") && salesmanKey) flds.push(salesmanKey);
+    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: mode === "manager" ? 1200 : 400 });
 
     // mode salesman: 'ilike' bisa kepanggil mirip -> saring EXACT (case-insensitive)
     if (mode === "salesman") {
@@ -101,7 +104,7 @@ export default async function handler(req, res) {
       orders = orders.filter((o) => norm(namaField(o[salesmanKey])) === target);
     }
 
-    if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, orders: [] });
+    if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, manager: mode === "manager", orders: [] });
     const ids = orders.map((o) => o.id);
 
     // 6) Field "Jadwal Kirim" (x_studio_jadwal_kirim) - diisi routing staff via RuteKirim (Fase 2)
@@ -125,18 +128,23 @@ export default async function handler(req, res) {
 
     // 7) Rasio item terkirim
     const lineMap = {};
+    const itemMap = {};
     try {
-      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids]]], {
-        fields: ["order_id", "product_uom_qty", "qty_delivered"],
+      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids], ["display_type", "=", false]]], {
+        fields: ["order_id", "product_id", "product_uom", "product_uom_qty", "qty_delivered"],
       });
       lines.forEach((l) => {
         const oid = (l.order_id || [])[0];
         if (!oid) return;
-        const m = lineMap[oid] || (lineMap[oid] = { tot: 0, done: 0 });
         const qty = l.product_uom_qty || 0;
         if (qty <= 0) return;
+        const m = lineMap[oid] || (lineMap[oid] = { tot: 0, done: 0 });
         m.tot++;
-        if ((l.qty_delivered || 0) >= qty) m.done++;
+        const terkirim = l.qty_delivered || 0;
+        if (terkirim >= qty) m.done++;
+        const nama = String((l.product_id || [])[1] || "").replace(/^\[[^\]]*\]\s*/, "").trim();
+        const sat = String((l.product_uom || [])[1] || "").trim();
+        (itemMap[oid] || (itemMap[oid] = [])).push({ nama, qty, terkirim, sat });
       });
     } catch {}
 
@@ -235,11 +243,13 @@ export default async function handler(req, res) {
         belumReady: stok === "belum" && !gagal,
         tanggalPO: o.date_order || "",
         partial: lm && lm.tot ? { done: lm.done, tot: lm.tot } : null,
+        items: (itemMap[o.id] || []).slice(0, 80),   // rincian barang: {nama, qty, terkirim, sat} - AMAN (tanpa harga)
+        salesman: mode === "manager" ? namaField(o[salesmanKey]) : "",   // hanya utk akses manajerial
       };
     });
 
     const bersih = out.filter((o) => !(o.stage >= 6 && o.aging > 21));
-    return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, orders: bersih });
+    return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, manager: mode === "manager", orders: bersih });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
