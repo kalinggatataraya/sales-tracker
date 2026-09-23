@@ -16,6 +16,10 @@
 //   SALES_SLA_DAYS = target hari PO -> Diterima (default 7). Lewat itu = TELAT.
 //   SALES_ETA_BUFFER_DAYS = buffer hari yang ditambahkan ke perkiraan stok masuk
 //     sebelum ditampilkan (default 2). Supaya janji ke customer tidak terlalu mepet.
+//
+// CATATAN ETA: tanggal perkiraan yang SUDAH LEWAT tidak pernah ditampilkan — karena
+// artinya PO pembelian telat dan jadwalnya belum di-update. Yang muncul: peringatan
+// supaya sales menghubungi purchasing, bukan tanggal yang menyesatkan.
 
 const ODOO_URL  = process.env.ODOO_URL;
 const ODOO_DB   = process.env.ODOO_DB;
@@ -23,6 +27,7 @@ const ODOO_USER = process.env.ODOO_USER || process.env.ODOO_LOGIN;
 const ODOO_KEY  = process.env.ODOO_KEY  || process.env.ODOO_API_KEY;
 const SLA_DAYS  = Number(process.env.SALES_SLA_DAYS || 7);
 const ETA_BUF   = Number(process.env.SALES_ETA_BUFFER_DAYS || 2);
+const HARI_MS   = 86400000;
 
 function reps() {
   try { return JSON.parse(process.env.SALES_REPS || "[]"); } catch { return []; }
@@ -40,6 +45,15 @@ function tglWIB(s, plusDays = 0) {
   const wib = new Date(d.getTime() + 7 * 3600 * 1000);
   return `${wib.getUTCDate()} ${BULAN[wib.getUTCMonth()]}`;
 }
+// true kalau tanggal (setelah buffer) sudah lewat -> jadwal PO basi, jangan dipakai
+function sudahLewat(s, plusDays = 0) {
+  if (!s) return false;
+  const d = new Date(String(s).replace(" ", "T") + "Z");
+  if (isNaN(d)) return false;
+  return d.getTime() + plusDays * HARI_MS < Date.now();
+}
+// ETA yang aman ditampilkan: kosong kalau tidak ada atau sudah lewat
+const etaAman = (s) => (s && !sudahLewat(s, ETA_BUF) ? tglWIB(s, ETA_BUF) : "");
 
 async function rpc(service, method, args) {
   const r = await fetch(`${ODOO_URL}/jsonrpc`, {
@@ -228,7 +242,10 @@ export default async function handler(req, res) {
           const inc = await exec("stock.move", "search_read", [d], { fields: ["product_id", "date"], order: "date asc", limit: 800 });
           inc.forEach((m) => {
             const p = (m.product_id || [])[0];
-            if (p && m.date && !etaMap[p]) etaMap[p] = m.date;   // urut asc -> yang pertama = paling cepat
+            if (!p || !m.date) return;
+            // ambil jadwal masuk paling cepat yang MASIH DI DEPAN; kalau semua sudah lewat,
+            // simpan yang terakhir supaya bisa ditandai "jadwal basi".
+            if (!etaMap[p] || (sudahLewat(etaMap[p], ETA_BUF) && !sudahLewat(m.date, ETA_BUF))) etaMap[p] = m.date;
           });
           break;
         } catch {}
@@ -292,14 +309,17 @@ export default async function handler(req, res) {
 
       // ETA gabungan: tanggal TERLAMA dari produk-produk yang kurang
       // (order baru bisa lengkap setelah item terakhir masuk).
-      let etaRaw = "", etaBelumJelas = false;
+      let etaRaw = "", etaBelumJelas = false, etaLewat = false;
       Object.keys(mm).forEach((k) => {
         if (mm[k].r >= 3) return;
         const d = etaMap[k];
-        if (!d) etaBelumJelas = true;
-        else if (!etaRaw || d > etaRaw) etaRaw = d;
+        if (!d) { etaBelumJelas = true; return; }
+        if (sudahLewat(d, ETA_BUF)) { etaLewat = true; return; }   // jadwal PO basi
+        if (!etaRaw || d > etaRaw) etaRaw = d;
       });
-      const eta = st.key <= 4 && !gagal ? tglWIB(etaRaw, ETA_BUF) : "";
+      const eta = (st.key <= 4 && !gagal) ? etaAman(etaRaw) : "";
+      // kalau ada item yang jadwalnya basi/belum ada, tanggal gabungan belum bisa dipercaya
+      const etaRagu = etaLewat || etaBelumJelas;
 
       // Rincian barang + status stok per item
       const items = (itemMap[o.id] || []).slice(0, 80).map((it) => {
@@ -309,7 +329,7 @@ export default async function handler(req, res) {
         return {
           nama: it.nama, qty: it.qty, terkirim: it.terkirim, sat: it.sat,
           stok: s,
-          eta: (s === "kosong" || s === "sebagian") ? tglWIB(etaMap[it.pid], ETA_BUF) : "",
+          eta: (s === "kosong" || s === "sebagian") ? etaAman(etaMap[it.pid]) : "",
         };
       });
 
@@ -328,11 +348,13 @@ export default async function handler(req, res) {
       } else if (stok === "sebagian") {
         alasanTipe = "sebagian";
         alasan = "Sebagian barang sudah siap, sisanya menunggu stok masuk"
-          + (eta ? `, perkiraan ${eta}.` : (etaBelumJelas ? " (jadwal masuk belum ada)." : "."));
+          + (eta && !etaRagu ? `, perkiraan ${eta}.`
+            : etaLewat ? " — jadwal barang masuk sudah lewat, cek ke purchasing."
+            : " (jadwal masuk belum ada).");
       } else if (stok === "kosong") {
         alasanTipe = "kosong";
-        alasan = eta
-          ? `Stok kosong — perkiraan barang masuk ${eta}.`
+        alasan = (eta && !etaRagu) ? `Stok kosong — perkiraan barang masuk ${eta}.`
+          : etaLewat ? "Stok kosong — jadwal barang masuk sudah lewat. Cek ke purchasing."
           : "Stok kosong — jadwal barang masuk belum ada. Hubungi purchasing.";
       } else if (stok === "proses") {
         alasanTipe = "proses";
@@ -355,8 +377,9 @@ export default async function handler(req, res) {
         belumReady: stok === "kosong" && !gagal, // dipakai KPI/filter "Stok kosong"
         alasan,
         alasanTipe,                             // gagal | siap | sebagian | kosong | proses | ""
-        eta,                                    // teks pendek, mis. "5 Agu" (sudah + buffer)
+        eta: etaRagu ? "" : eta,                // hanya tanggal yang layak dijanjikan
         etaBelumJelas,
+        etaLewat,
         tanggalPO: o.date_order || "",
         partial: lm && lm.tot ? { done: lm.done, tot: lm.tot } : null,
         items,
