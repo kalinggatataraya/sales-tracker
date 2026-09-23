@@ -11,21 +11,35 @@
 //   ODOO_URL, ODOO_DB, ODOO_USER, ODOO_KEY   -> sama seperti RuteKirim (user read-only cukup)
 //   SALES_REPS = JSON daftar sales. Petakan tiap sales ke nilai kolom "Salesman" Odoo:
 //     [{"token":"novan-4k2p","nama":"Novan","salesman":"NOVAN"},
-//      {"token":"wawan-8m3x","nama":"Wawan","salesman":"WAWAN"}]
+//      {"token":"aris-7q4v","nama":"Aris","salesman":"ARIS"}]
 //     (Alternatif kalau sales KEBETULAN user Odoo: pakai "uid":15 atau "email":"...".)
 //   SALES_SLA_DAYS = target hari PO -> Diterima (default 7). Lewat itu = TELAT.
+//   SALES_ETA_BUFFER_DAYS = buffer hari yang ditambahkan ke perkiraan stok masuk
+//     sebelum ditampilkan (default 2). Supaya janji ke customer tidak terlalu mepet.
 
 const ODOO_URL  = process.env.ODOO_URL;
 const ODOO_DB   = process.env.ODOO_DB;
 const ODOO_USER = process.env.ODOO_USER || process.env.ODOO_LOGIN;
 const ODOO_KEY  = process.env.ODOO_KEY  || process.env.ODOO_API_KEY;
 const SLA_DAYS  = Number(process.env.SALES_SLA_DAYS || 7);
+const ETA_BUF   = Number(process.env.SALES_ETA_BUFFER_DAYS || 2);
 
 function reps() {
   try { return JSON.parse(process.env.SALES_REPS || "[]"); } catch { return []; }
 }
 const norm = (x) => String(x || "").trim().toLowerCase();
 const namaField = (v) => (Array.isArray(v) ? (v[1] || "") : (v || "")); // many2one [id,nama] atau scalar
+
+// --- Format tanggal Indonesia (WIB), tanpa bergantung ICU di serverless ---
+const BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+function tglWIB(s, plusDays = 0) {
+  if (!s) return "";
+  const d = new Date(String(s).replace(" ", "T") + "Z");
+  if (isNaN(d)) return "";
+  d.setUTCDate(d.getUTCDate() + plusDays);
+  const wib = new Date(d.getTime() + 7 * 3600 * 1000);
+  return `${wib.getUTCDate()} ${BULAN[wib.getUTCMonth()]}`;
+}
 
 async function rpc(service, method, args) {
   const r = await fetch(`${ODOO_URL}/jsonrpc`, {
@@ -65,8 +79,6 @@ export default async function handler(req, res) {
     } catch {}
 
     // 4) Tentukan MODE scoping
-    //    (a) mode "salesman": rep punya nilai salesman -> filter kolom Salesman.
-    //    (b) mode "user": rep punya uid/email -> filter user_id (kalau sales kebetulan user Odoo).
     const baseState = ["state", "in", ["sale", "done"]];
     let dom, mode = "";
     if (rep.role === "manager" || rep.all === true) {
@@ -126,7 +138,7 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    // 7) Rasio item terkirim
+    // 7) Rasio item terkirim + rincian barang (per produk)
     const lineMap = {};
     const itemMap = {};
     // Deteksi field satuan (UoM) di sale.order.line. Odoo 19 = "product_uom_id"; versi lama = "product_uom".
@@ -137,9 +149,9 @@ export default async function handler(req, res) {
             || Object.keys(lf).find((k) => lf[k] && lf[k].relation === "uom.uom" && lf[k].type === "many2one") || "";
     } catch {}
     try {
-      const flds = ["order_id", "product_id", "product_uom_qty", "qty_delivered"];
-      if (uomKey) flds.push(uomKey);
-      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids], ["display_type", "=", false]]], { fields: flds });
+      const lflds = ["order_id", "product_id", "product_uom_qty", "qty_delivered"];
+      if (uomKey) lflds.push(uomKey);
+      const lines = await exec("sale.order.line", "search_read", [[["order_id", "in", ids], ["display_type", "=", false]]], { fields: lflds });
       lines.forEach((l) => {
         const oid = (l.order_id || [])[0];
         if (!oid) return;
@@ -151,12 +163,15 @@ export default async function handler(req, res) {
         if (terkirim >= qty) m.done++;
         const nama = String((l.product_id || [])[1] || "").replace(/^\[[^\]]*\]\s*/, "").trim();
         const sat = uomKey ? String((l[uomKey] || [])[1] || "").trim() : "";
-        (itemMap[oid] || (itemMap[oid] = [])).push({ nama, qty, terkirim, sat });
+        (itemMap[oid] || (itemMap[oid] = [])).push({ pid: (l.product_id || [])[0] || 0, nama, qty, terkirim, sat });
       });
     } catch {}
 
-    // 8) Reservasi stok -> "Barang Disiapkan"
-    const siapMap = {};
+    // 8) Reservasi stok -> status kesiapan per ORDER dan per PRODUK
+    //    rank: 3 = ter-reserve penuh (READY), 2 = sebagian, 1 = belum ada stok
+    const siapMap = {};   // oid -> {tot, asg, part}
+    const moveMap = {};   // oid -> { pid: {r} }
+    const kurangPid = new Set();
     try {
       const picks = await exec("stock.picking", "search_read", [[
         ["sale_id", "in", ids],
@@ -173,20 +188,54 @@ export default async function handler(req, res) {
         const moves = await exec("stock.move", "search_read", [[
           ["picking_id", "in", pickIds],
           ["state", "not in", ["done", "cancel"]],
-        ]], { fields: ["picking_id", "state"] });
+        ]], { fields: ["picking_id", "state", "product_id"] });
         moves.forEach((m) => {
-          const pid = (m.picking_id || [])[0];
-          const oid = pickToOrder[pid];
+          const pid_ = (m.picking_id || [])[0];
+          const oid = pickToOrder[pid_];
           if (!oid) return;
           const s = siapMap[oid] || (siapMap[oid] = { tot: 0, asg: 0, part: 0 });
           s.tot++;
           if (m.state === "assigned") s.asg++;
           else if (m.state === "partially_available") s.part++;
+
+          const prod = (m.product_id || [])[0];
+          if (!prod) return;
+          const r = m.state === "assigned" ? 3 : m.state === "partially_available" ? 2 : 1;
+          const mm = moveMap[oid] || (moveMap[oid] = {});
+          const cur = mm[prod];
+          if (!cur || r < cur.r) mm[prod] = { r };   // ambil kondisi TERBURUK per produk
+          if (r < 3) kurangPid.add(prod);
         });
       }
     } catch {}
 
-    // 8b) Tag "GAGAL KIRIM" (ditulis RuteKirim saat pengiriman gagal) -> alasan utk sales
+    // 8b) Perkiraan stok masuk (ETA) untuk produk yang kurang.
+    //     Dibaca dari stock.move INCOMING yang sudah dikonfirmasi (draft/RFQ TIDAK dihitung
+    //     supaya tidak memberi janji dari PO yang belum pasti).
+    const etaMap = {};
+    if (kurangPid.size) {
+      const prods = [...kurangPid];
+      const baseDom = [
+        ["product_id", "in", prods],
+        ["state", "not in", ["done", "cancel", "draft"]],
+      ];
+      const coba = [
+        [...baseDom, ["picking_type_id.code", "=", "incoming"]],
+        [...baseDom, ["picking_id.picking_type_id.code", "=", "incoming"]],
+      ];
+      for (const d of coba) {
+        try {
+          const inc = await exec("stock.move", "search_read", [d], { fields: ["product_id", "date"], order: "date asc", limit: 800 });
+          inc.forEach((m) => {
+            const p = (m.product_id || [])[0];
+            if (p && m.date && !etaMap[p]) etaMap[p] = m.date;   // urut asc -> yang pertama = paling cepat
+          });
+          break;
+        } catch {}
+      }
+    }
+
+    // 8c) Tag "GAGAL KIRIM" (ditulis RuteKirim saat pengiriman gagal) -> alasan utk sales
     const gagalMap = {};
     try {
       const tset = new Set();
@@ -201,14 +250,19 @@ export default async function handler(req, res) {
       }
     } catch {}
 
-    // Kesiapan stok: "ada" (ter-reserve penuh) / "sebagian" / "belum" (belum ada reservasi) / "" (sedang/sudah dikirim -> tak relevan)
+    // Kesiapan stok per order:
+    //   "ada"      = semua ter-reserve (barang siap, tinggal kirim)
+    //   "sebagian" = sebagian ter-reserve
+    //   "kosong"   = ada surat jalan tapi belum ada stok ter-reserve
+    //   "proses"   = belum ada surat jalan (baru diproses admin/gudang)
+    //   ""         = sedang/sudah dikirim -> tak relevan
     const stokState = (o, stageKey) => {
       if (stageKey >= 5 || o.delivery_status === "full") return "";
       const s = siapMap[o.id];
-      if (!s || s.tot === 0) return "belum";
+      if (!s || s.tot === 0) return "proses";
       if (s.asg >= s.tot) return "ada";
       if (s.asg + s.part > 0) return "sebagian";
-      return "belum";
+      return "kosong";
     };
 
     // 9) Tahap
@@ -232,8 +286,59 @@ export default async function handler(req, res) {
       const aging = hari(o.date_order);
       const delivered = st.key >= 6;
       const g = gagalMap[o.id];
-      const gagal = !!g && st.key <= 4;          // tampilkan hanya bila belum dikirim/selesai
-      const stok = stokState(o, st.key);          // "ada" | "sebagian" | "belum" | ""
+      const gagal = !!g && st.key <= 4;
+      const stok = stokState(o, st.key);
+      const mm = moveMap[o.id] || {};
+
+      // ETA gabungan: tanggal TERLAMA dari produk-produk yang kurang
+      // (order baru bisa lengkap setelah item terakhir masuk).
+      let etaRaw = "", etaBelumJelas = false;
+      Object.keys(mm).forEach((k) => {
+        if (mm[k].r >= 3) return;
+        const d = etaMap[k];
+        if (!d) etaBelumJelas = true;
+        else if (!etaRaw || d > etaRaw) etaRaw = d;
+      });
+      const eta = st.key <= 4 && !gagal ? tglWIB(etaRaw, ETA_BUF) : "";
+
+      // Rincian barang + status stok per item
+      const items = (itemMap[o.id] || []).slice(0, 80).map((it) => {
+        const v = mm[it.pid];
+        let s = "";
+        if (it.terkirim < it.qty && v) s = v.r >= 3 ? "ready" : v.r === 2 ? "sebagian" : "kosong";
+        return {
+          nama: it.nama, qty: it.qty, terkirim: it.terkirim, sat: it.sat,
+          stok: s,
+          eta: (s === "kosong" || s === "sebagian") ? tglWIB(etaMap[it.pid], ETA_BUF) : "",
+        };
+      });
+
+      // Alasan kenapa belum dikirim (satu kalimat, siap tampil)
+      let alasanTipe = "", alasan = "";
+      if (gagal) {
+        alasanTipe = "gagal";
+        alasan = `Pengiriman gagal${g.alasan ? ` — ${g.alasan}` : ""}. Akan dijadwalkan ulang.`;
+      } else if (st.key >= 5) {
+        alasanTipe = ""; alasan = "";
+      } else if (stok === "ada") {
+        alasanTipe = "siap";
+        alasan = (hasSched && schedMap[o.id])
+          ? `Barang sudah siap — dijadwalkan kirim ${tglWIB(schedMap[o.id])}.`
+          : "Barang sudah siap di gudang — menunggu jadwal kirim.";
+      } else if (stok === "sebagian") {
+        alasanTipe = "sebagian";
+        alasan = "Sebagian barang sudah siap, sisanya menunggu stok masuk"
+          + (eta ? `, perkiraan ${eta}.` : (etaBelumJelas ? " (jadwal masuk belum ada)." : "."));
+      } else if (stok === "kosong") {
+        alasanTipe = "kosong";
+        alasan = eta
+          ? `Stok kosong — perkiraan barang masuk ${eta}.`
+          : "Stok kosong — jadwal barang masuk belum ada. Hubungi purchasing.";
+      } else if (stok === "proses") {
+        alasanTipe = "proses";
+        alasan = "Pesanan sedang diproses admin — surat jalan belum dibuat.";
+      }
+
       return {
         po: o.name,
         ref: o.client_order_ref || "",
@@ -246,12 +351,16 @@ export default async function handler(req, res) {
         delivered,
         gagal,
         gagalAlasan: gagal ? (g.alasan || "") : "",
-        stok,
-        belumReady: stok === "belum" && !gagal,
+        stok,                                   // ada | sebagian | kosong | proses | ""
+        belumReady: stok === "kosong" && !gagal, // dipakai KPI/filter "Stok kosong"
+        alasan,
+        alasanTipe,                             // gagal | siap | sebagian | kosong | proses | ""
+        eta,                                    // teks pendek, mis. "5 Agu" (sudah + buffer)
+        etaBelumJelas,
         tanggalPO: o.date_order || "",
         partial: lm && lm.tot ? { done: lm.done, tot: lm.tot } : null,
-        items: (itemMap[o.id] || []).slice(0, 80),   // rincian barang: {nama, qty, terkirim, sat} - AMAN (tanpa harga)
-        salesman: mode === "manager" ? namaField(o[salesmanKey]) : "",   // hanya utk akses manajerial
+        items,
+        salesman: mode === "manager" ? namaField(o[salesmanKey]) : "",
       };
     });
 
