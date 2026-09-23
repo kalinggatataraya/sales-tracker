@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   RefreshCw, Search, Copy, ChevronLeft, AlertTriangle, Package,
-  Truck, CheckCircle2, Clock, LogOut, MapPin, Check,
+  Truck, CheckCircle2, Clock, LogOut, Check, PackageX, CalendarClock,
 } from "lucide-react";
 
 /* ---------- Tema (selaras dengan RuteKirim) ---------- */
@@ -32,10 +32,46 @@ const tglPanjang = (s) => {
   return d.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
 };
 
+/* ---------- Gaya banner alasan per tipe ---------- */
+const ALASAN_STYLE = {
+  gagal:    { bg: "#fef2f2", bd: "#fecaca", col: T.danger,  Ico: AlertTriangle },
+  kosong:   { bg: "#fef2f2", bd: "#fecaca", col: T.danger,  Ico: PackageX },
+  sebagian: { bg: "#fffbeb", bd: "#fde68a", col: T.warn,    Ico: Package },
+  proses:   { bg: "#f1f3f7", bd: "#e4e8ee", col: T.muted,   Ico: Clock },
+  siap:     { bg: "#f0fdf4", bd: "#bbf7d0", col: T.ok,      Ico: CheckCircle2 },
+};
+
+function AlasanBox({ o, besar }) {
+  const s = ALASAN_STYLE[o.alasanTipe];
+  if (!s || !o.alasan) return null;
+  const { Ico } = s;
+  return (
+    <div style={{
+      marginTop: besar ? 0 : 8, marginBottom: besar ? 14 : 0,
+      display: "flex", alignItems: "flex-start", gap: 7,
+      background: s.bg, border: `1px solid ${s.bd}`, color: s.col,
+      borderRadius: besar ? 12 : 9, padding: besar ? "10px 12px" : "7px 9px",
+      fontSize: besar ? 13 : 12.5, fontWeight: 700, lineHeight: 1.4, textAlign: "left",
+    }}>
+      <Ico size={besar ? 16 : 14} style={{ flex: "0 0 auto", marginTop: 1 }} />
+      <span>{o.alasan}</span>
+    </div>
+  );
+}
+
 const pesanCustomer = (o) => {
   const ref = o.ref || o.po;
-  if (o.gagal) return `Halo Bapak/Ibu, mohon maaf pengiriman pesanan PO ${ref} sempat tertunda. Kami segera menjadwalkan ulang pengirimannya. Terima kasih atas pengertiannya \u{1F64F}`;
-  if (o.belumReady) return `Halo Bapak/Ibu, update pesanan PO ${ref}: barang sedang kami siapkan. Kami kabari kembali begitu siap dikirim. Terima kasih \u{1F64F}`;
+  const akhir = " Terima kasih \u{1F64F}";
+  if (o.gagal)
+    return `Halo Bapak/Ibu, mohon maaf pengiriman pesanan PO ${ref} sempat tertunda. Kami segera menjadwalkan ulang pengirimannya. Terima kasih atas pengertiannya \u{1F64F}`;
+  if (o.alasanTipe === "kosong")
+    return o.eta
+      ? `Halo Bapak/Ibu, update pesanan PO ${ref}: stok sedang kami siapkan, perkiraan siap dikirim sekitar ${o.eta}. Akan kami kabari begitu barang tersedia.${akhir}`
+      : `Halo Bapak/Ibu, update pesanan PO ${ref}: barang sedang kami siapkan. Kami kabari kembali begitu siap dikirim.${akhir}`;
+  if (o.alasanTipe === "sebagian")
+    return o.eta
+      ? `Halo Bapak/Ibu, update pesanan PO ${ref}: sebagian barang sudah siap, sisanya menyusul dengan perkiraan sekitar ${o.eta}. Mohon info apakah dikirim bertahap atau sekaligus.${akhir}`
+      : `Halo Bapak/Ibu, update pesanan PO ${ref}: sebagian barang sudah siap, sisanya sedang kami siapkan. Mohon info apakah dikirim bertahap atau sekaligus.${akhir}`;
   const inti = {
     2: "pesanan sedang kami proses",
     3: "barang sedang kami siapkan",
@@ -43,7 +79,7 @@ const pesanCustomer = (o) => {
     5: o.partial && o.partial.done < o.partial.tot ? "sebagian barang sudah dalam pengiriman" : "barang sedang dalam pengiriman",
     6: "barang sudah diterima",
   }[o.stage] || "pesanan sedang kami proses";
-  return `Halo Bapak/Ibu, update pesanan PO ${ref}: ${inti}. Terima kasih 🙏`;
+  return `Halo Bapak/Ibu, update pesanan PO ${ref}: ${inti}.${akhir}`;
 };
 
 /* ---------- Stepper 6 titik ---------- */
@@ -130,20 +166,25 @@ function OrderCard({ o, onOpen }) {
         );
       })()}
 
-      {o.gagal ? (
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "#fef2f2", border: "1px solid #fecaca", color: T.danger, borderRadius: 9, padding: "6px 9px", fontSize: 12.5, fontWeight: 700 }}>
-          <AlertTriangle size={14} style={{ flex: "0 0 auto" }} /> <span>Gagal kirim{o.gagalAlasan ? ` — ${o.gagalAlasan}` : ""}</span>
-        </div>
-      ) : o.belumReady ? (
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "#fffbeb", border: "1px solid #fde68a", color: T.warn, borderRadius: 9, padding: "6px 9px", fontSize: 12.5, fontWeight: 700 }}>
-          <Package size={14} style={{ flex: "0 0 auto" }} /> <span>Barang belum ready</span>
-        </div>
-      ) : o.stok === "sebagian" ? (
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "#fffbeb", border: "1px solid #fde68a", color: T.warn, borderRadius: 9, padding: "6px 9px", fontSize: 12.5, fontWeight: 700 }}>
-          <Package size={14} style={{ flex: "0 0 auto" }} /> <span>Sebagian barang ready</span>
-        </div>
-      ) : null}
+      <AlasanBox o={o} />
     </button>
+  );
+}
+
+/* ---------- Chip status per item ---------- */
+function ItemChip({ it }) {
+  const penuh = it.terkirim >= it.qty;
+  const sebagianKirim = it.terkirim > 0 && it.terkirim < it.qty;
+  let col = T.primary, lbl = "Disiapkan", Ico = Package, bg = "#eff6ff", bd = "#bfdbfe";
+  if (penuh)               { col = T.ok;     lbl = "Terkirim";                    Ico = CheckCircle2; bg = "#f0fdf4"; bd = "#bbf7d0"; }
+  else if (sebagianKirim)  { col = T.warn;   lbl = `Sebagian ${it.terkirim}/${it.qty}`; Ico = Truck;  bg = "#fffbeb"; bd = "#fde68a"; }
+  else if (it.stok === "ready")    { col = T.ok;   lbl = "Siap kirim";  Ico = CheckCircle2; bg = "#f0fdf4"; bd = "#bbf7d0"; }
+  else if (it.stok === "sebagian") { col = T.warn; lbl = "Stok sebagian"; Ico = Package;    bg = "#fffbeb"; bd = "#fde68a"; }
+  else if (it.stok === "kosong")   { col = T.danger; lbl = "Stok kosong"; Ico = PackageX;   bg = "#fef2f2"; bd = "#fecaca"; }
+  return (
+    <span style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: col, background: bg, border: `1px solid ${bd}`, borderRadius: 20, padding: "4px 9px" }}>
+      <Ico size={13} /> {lbl}
+    </span>
   );
 }
 
@@ -191,19 +232,17 @@ function Detail({ o, onClose, onToast }) {
           )}
         </div>
 
-        {o.gagal ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fef2f2", border: "1px solid #fecaca", color: T.danger, borderRadius: 12, padding: "10px 12px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
-            <AlertTriangle size={16} style={{ flex: "0 0 auto" }} /> <span>Pengiriman gagal{o.gagalAlasan ? ` — ${o.gagalAlasan}` : ""}. Akan dijadwalkan ulang.</span>
+        <AlasanBox o={o} besar />
+
+        {o.eta && (o.alasanTipe === "kosong" || o.alasanTipe === "sebagian") && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, background: T.surface,
+            border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 12px", marginBottom: 14,
+          }}>
+            <CalendarClock size={16} color={T.muted} />
+            <span style={{ fontSize: 13, color: T.text }}>Perkiraan stok masuk: <b>{o.eta}</b></span>
           </div>
-        ) : o.belumReady ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fffbeb", border: "1px solid #fde68a", color: T.warn, borderRadius: 12, padding: "10px 12px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
-            <Package size={16} style={{ flex: "0 0 auto" }} /> <span>Barang belum ready — stok masih disiapkan / menunggu.</span>
-          </div>
-        ) : o.stok === "sebagian" ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fffbeb", border: "1px solid #fde68a", color: T.warn, borderRadius: 12, padding: "10px 12px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
-            <Package size={16} style={{ flex: "0 0 auto" }} /> <span>Sebagian barang sudah ready, sisanya menunggu stok.</span>
-          </div>
-        ) : null}
+        )}
 
         {/* Timeline vertikal */}
         <div style={{ position: "relative", paddingLeft: 6 }}>
@@ -214,6 +253,7 @@ function Detail({ o, onClose, onToast }) {
             const last = i === STAGES.length - 1;
             let sub = "";
             if (n === 3 && o.partial && o.partial.done < o.partial.tot && o.stage >= 3) sub = `Sebagian: ${o.partial.done} dari ${o.partial.tot} item`;
+            if (n === 3 && cur && o.alasanTipe === "kosong") sub = o.eta ? `Menunggu stok masuk — perkiraan ${o.eta}` : "Menunggu stok masuk";
             if (n === 4 && o.scheduled) sub = `Rencana kirim: ${tglPanjang(o.scheduled)}`;
             return (
               <div key={i} style={{ display: "flex", gap: 12, minHeight: last ? 24 : 46 }}>
@@ -242,28 +282,21 @@ function Detail({ o, onClose, onToast }) {
         {o.items && o.items.length > 0 && (
           <div style={{ marginTop: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 8 }}>Rincian Barang</div>
-            {o.items.map((it, i) => {
-              const penuh = it.terkirim >= it.qty;
-              const sebagian = it.terkirim > 0 && it.terkirim < it.qty;
-              const stCol = penuh ? T.ok : sebagian ? T.warn : T.primary;
-              const stLbl = penuh ? "Terkirim" : sebagian ? `Sebagian ${it.terkirim}/${it.qty}` : "Disiapkan";
-              const StIco = penuh ? CheckCircle2 : sebagian ? Truck : Package;
-              const bg = penuh ? "#f0fdf4" : sebagian ? "#fffbeb" : "#eff6ff";
-              const bd = penuh ? "#bbf7d0" : sebagian ? "#fde68a" : "#bfdbfe";
-              return (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 11px", marginBottom: 7 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text, lineHeight: 1.3 }}>{it.nama || "\u2014"}</div>
-                    <div style={{ fontSize: 11.5, color: T.muted, marginTop: 1 }}>{it.qty}{it.sat ? " " + it.sat : ""}{it.terkirim > 0 && it.terkirim < it.qty ? ` \u00b7 terkirim ${it.terkirim}` : ""}</div>
+            {o.items.map((it, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 11px", marginBottom: 7 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text, lineHeight: 1.3 }}>{it.nama || "\u2014"}</div>
+                  <div style={{ fontSize: 11.5, color: T.muted, marginTop: 1 }}>
+                    {it.qty}{it.sat ? " " + it.sat : ""}
+                    {it.terkirim > 0 && it.terkirim < it.qty ? ` \u00b7 terkirim ${it.terkirim}` : ""}
+                    {it.eta ? ` \u00b7 masuk \u00b1 ${it.eta}` : ""}
                   </div>
-                  <span style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: stCol, background: bg, border: `1px solid ${bd}`, borderRadius: 20, padding: "4px 9px" }}>
-                    <StIco size={13} /> {stLbl}
-                  </span>
                 </div>
-              );
-            })}
+                <ItemChip it={it} />
+              </div>
+            ))}
             <div style={{ fontSize: 11, color: T.muted, marginTop: 2, lineHeight: 1.4 }}>
-              Terkirim = sudah dikirim ke customer · Disiapkan = sedang diproses gudang
+              Siap kirim = stok sudah dipesan untuk PO ini · Stok kosong = menunggu barang masuk
             </div>
           </div>
         )}
@@ -278,6 +311,7 @@ function Detail({ o, onClose, onToast }) {
         </button>
         <div style={{ fontSize: 11.5, color: T.muted, textAlign: "center", marginTop: 8, lineHeight: 1.4 }}>
           Pesan aman untuk dikirim ke customer — tidak memuat data internal.
+          {o.eta ? " Tanggal yang disebut adalah perkiraan, bukan janji pasti." : ""}
         </div>
       </div>
     </div>
@@ -351,6 +385,7 @@ export default function SalesTracker() {
     if (filter === "telat") list = list.filter((o) => o.overdue);
     else if (filter === "gagal") list = list.filter((o) => o.gagal);
     else if (filter === "belum") list = list.filter((o) => o.belumReady);
+    else if (filter === "siap") list = list.filter((o) => o.alasanTipe === "siap");
     else if (filter === "proses") list = list.filter((o) => o.stage >= 2 && o.stage <= 3);
     else if (filter === "kirim") list = list.filter((o) => o.stage === 4 || o.stage === 5);
     else if (filter === "selesai") list = list.filter((o) => o.stage >= 6);
@@ -375,7 +410,7 @@ export default function SalesTracker() {
           <label style={{ fontSize: 12.5, fontWeight: 600, color: T.text }}>Kode akses</label>
           <input
             value={inp} onChange={(e) => setInp(e.target.value)} onKeyDown={(e) => e.key === "Enter" && masuk()}
-            placeholder="mis. pebri-9x2f"
+            placeholder="mis. aris-7q4v"
             style={{ width: "100%", marginTop: 6, padding: "12px 13px", fontSize: 15, borderRadius: 11, border: `1px solid ${T.border}`, outline: "none", fontFamily: "inherit" }}
           />
           <button onClick={masuk} style={{
@@ -459,7 +494,7 @@ export default function SalesTracker() {
 
         {/* Filter */}
         <div style={{ display: "flex", gap: 7, marginBottom: 14, overflowX: "auto", paddingBottom: 2 }}>
-          {[["semua", "Semua"], ["gagal", "Gagal"], ["belum", "Belum ready"], ["telat", "Telat"], ["proses", "Proses"], ["kirim", "Dikirim"], ["selesai", "Selesai"]].map(([id, l]) => (
+          {[["semua", "Semua"], ["gagal", "Gagal"], ["belum", "Stok kosong"], ["siap", "Siap kirim"], ["telat", "Telat"], ["proses", "Proses"], ["kirim", "Dikirim"], ["selesai", "Selesai"]].map(([id, l]) => (
             <button key={id} onClick={() => setFilter(id)} style={{
               flex: "0 0 auto", padding: "7px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
               border: `1px solid ${filter === id ? T.primary : T.border}`,
