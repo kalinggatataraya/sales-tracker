@@ -1,17 +1,19 @@
 // api/sales.js — Jembatan read-only untuk SALES TRACKER.
 // Prinsip keamanan (WAJIB): SCOPE + PROJECTION di sisi server.
-//   SCOPE      : hanya mengambil sale.order milik SATU sales (berdasar kolom "Salesman").
+//   SCOPE      : hanya mengambil sale.order milik sales yang berhak dilihat token ini.
 //   PROJECTION : hanya mengembalikan field STATUS yang di-allowlist.
-// TIDAK PERNAH mengembalikan: nilai penjualan, biaya/modal, rute, order sales lain.
+// TIDAK PERNAH mengembalikan: nilai penjualan, biaya/modal, rute, order di luar scope.
 //
 // Sales TIDAK perlu akun Odoo. Pemisahan dibaca dari kolom "Salesman" di sale.order
 // (field khusus, sama yang dipakai RuteKirim — dideteksi otomatis dari label "Salesman").
 //
 // ENV VARS di Vercel (project SalesTracker):
 //   ODOO_URL, ODOO_DB, ODOO_USER, ODOO_KEY   -> sama seperti RuteKirim (user read-only cukup)
-//   SALES_REPS = JSON daftar sales. Petakan tiap sales ke nilai kolom "Salesman" Odoo:
-//     [{"token":"novan-4k2p","nama":"Novan","salesman":"NOVAN"},
-//      {"token":"aris-7q4v","nama":"Aris","salesman":"ARIS"}]
+//   SALES_REPS = JSON daftar akses. Tiga bentuk:
+//     1) SATU SALES  -> {"token":"aris-7q4v","nama":"Aris","salesman":"ARIS"}
+//     2) SATU TIM    -> {"token":"josafat-6r2m","nama":"Josafat","team":["EKO","ANTO","ARIS"]}
+//        (manager hanya melihat sales di daftar "team"-nya, lengkap dengan filter per sales)
+//     3) SEMUA SALES -> {"token":"josh-2v9r","nama":"Josh","role":"manager"}
 //     (Alternatif kalau sales KEBETULAN user Odoo: pakai "uid":15 atau "email":"...".)
 //   SALES_SLA_DAYS = target hari PO -> Diterima (default 7). Lewat itu = TELAT.
 //   SALES_ETA_BUFFER_DAYS = buffer hari yang ditambahkan ke perkiraan stok masuk
@@ -94,8 +96,17 @@ export default async function handler(req, res) {
 
     // 4) Tentukan MODE scoping
     const baseState = ["state", "in", ["sale", "done"]];
+    const team = Array.isArray(rep.team) ? rep.team.map(String).map((s) => s.trim()).filter(Boolean) : [];
     let dom, mode = "";
-    if (rep.role === "manager" || rep.all === true) {
+    if (team.length) {
+      // SCOPE TIM: OR antar nama sales di tim, lalu disaring EXACT di bawah.
+      if (!salesmanKey)
+        return res.status(500).json({ error: "Kolom 'Salesman' tidak ditemukan di Odoo. Pastikan field bernama/berlabel 'Salesman' ada di sale.order." });
+      mode = "team";
+      const konds = team.map((t) => [salesmanKey, "ilike", t]);
+      const orOps = new Array(Math.max(0, konds.length - 1)).fill("|");
+      dom = [...orOps, ...konds, baseState];
+    } else if (rep.role === "manager" || rep.all === true) {
       mode = "manager";
       dom = [baseState];
     } else if (rep.salesman) {
@@ -114,23 +125,27 @@ export default async function handler(req, res) {
         spUid = u.length ? u[0].id : null;
       }
       if (!spUid)
-        return res.status(500).json({ error: "Sales belum bisa dipetakan. Isi 'salesman' (nilai kolom Salesman di Odoo), atau 'uid'/'email' jika sales adalah user Odoo." });
+        return res.status(500).json({ error: "Sales belum bisa dipetakan. Isi 'salesman' (nilai kolom Salesman di Odoo), 'team' (daftar sales), atau 'uid'/'email' jika sales adalah user Odoo." });
       mode = "user";
       dom = [["user_id", "=", spUid], baseState];
     }
+    const lihatSemuaSales = mode === "manager" || mode === "team";
 
     // 5) Ambil order (SCOPE)
     const flds = ["id", "name", "client_order_ref", "partner_id", "date_order", "delivery_status", "state", "tag_ids"];
-    if ((mode === "salesman" || mode === "manager") && salesmanKey) flds.push(salesmanKey);
-    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: mode === "manager" ? 600 : 400 });
+    if ((mode === "salesman" || lihatSemuaSales) && salesmanKey) flds.push(salesmanKey);
+    let orders = await exec("sale.order", "search_read", [dom], { fields: flds, order: "date_order desc", limit: lihatSemuaSales ? 800 : 400 });
 
-    // mode salesman: 'ilike' bisa kepanggil mirip -> saring EXACT (case-insensitive)
+    // 'ilike' bisa kepanggil mirip (mis. OFFICE vs OFFICE HORECA) -> saring EXACT (case-insensitive)
     if (mode === "salesman") {
       const target = norm(rep.salesman);
       orders = orders.filter((o) => norm(namaField(o[salesmanKey])) === target);
+    } else if (mode === "team") {
+      const set = new Set(team.map(norm));
+      orders = orders.filter((o) => set.has(norm(namaField(o[salesmanKey]))));
     }
 
-    if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, manager: mode === "manager", orders: [] });
+    if (!orders.length) return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, manager: lihatSemuaSales, tim: mode === "team" ? team : null, orders: [] });
     const ids = orders.map((o) => o.id);
 
     // 6) Field "Jadwal Kirim" (x_studio_jadwal_kirim) - diisi routing staff via RuteKirim (Fase 2)
@@ -361,6 +376,9 @@ export default async function handler(req, res) {
         alasan = "Pesanan sedang diproses admin — surat jalan belum dibuat.";
       }
 
+      // Barang siap tapi tidak kunjung dikirim -> stok terkunci, perlu ditindak
+      const mandek = stok === "ada" && !gagal && aging > 14;
+
       return {
         po: o.name,
         ref: o.client_order_ref || "",
@@ -375,6 +393,7 @@ export default async function handler(req, res) {
         gagalAlasan: gagal ? (g.alasan || "") : "",
         stok,                                   // ada | sebagian | kosong | proses | ""
         belumReady: stok === "kosong" && !gagal, // dipakai KPI/filter "Stok kosong"
+        mandek,                                 // siap kirim > 14 hari
         alasan,
         alasanTipe,                             // gagal | siap | sebagian | kosong | proses | ""
         eta: etaRagu ? "" : eta,                // hanya tanggal yang layak dijanjikan
@@ -383,12 +402,19 @@ export default async function handler(req, res) {
         tanggalPO: o.date_order || "",
         partial: lm && lm.tot ? { done: lm.done, tot: lm.tot } : null,
         items,
-        salesman: mode === "manager" ? namaField(o[salesmanKey]) : "",
+        salesman: lihatSemuaSales ? namaField(o[salesmanKey]) : "",
       };
     });
 
     const bersih = out.filter((o) => !(o.stage >= 6 && o.aging > 21));
-    return res.status(200).json({ ok: true, rep: rep.nama || "", sla: SLA_DAYS, manager: mode === "manager", orders: bersih });
+    return res.status(200).json({
+      ok: true,
+      rep: rep.nama || "",
+      sla: SLA_DAYS,
+      manager: lihatSemuaSales,
+      tim: mode === "team" ? team : null,
+      orders: bersih,
+    });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
