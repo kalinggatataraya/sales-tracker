@@ -8,7 +8,7 @@ import {
 const T = {
   bg: "#f7f8fa", surface: "#ffffff", surface2: "#f1f3f7", border: "#e4e8ee",
   text: "#111827", muted: "#667085", primary: "#2563eb",
-  ok: "#16a34a", warn: "#d97706", danger: "#e0413e",
+  ok: "#16a34a", warn: "#d97706", danger: "#e0413e", ungu: "#7c3aed",
 };
 
 const STAGES = [
@@ -45,16 +45,24 @@ function AlasanBox({ o, besar }) {
   const s = ALASAN_STYLE[o.alasanTipe];
   if (!s || !o.alasan) return null;
   const { Ico } = s;
+  // barang siap tapi menganggur lama -> naikkan urgensinya
+  const gaya = o.mandek
+    ? { bg: "#f5f3ff", bd: "#ddd6fe", col: T.ungu, Ico: AlertTriangle }
+    : s;
+  const Icon = gaya.Ico;
+  const teks = o.mandek
+    ? `Barang sudah siap ${o.aging} hari tapi belum dikirim — cek ke customer / gudang.`
+    : o.alasan;
   return (
     <div style={{
       marginTop: besar ? 0 : 8, marginBottom: besar ? 14 : 0,
       display: "flex", alignItems: "flex-start", gap: 7,
-      background: s.bg, border: `1px solid ${s.bd}`, color: s.col,
+      background: gaya.bg, border: `1px solid ${gaya.bd}`, color: gaya.col,
       borderRadius: besar ? 12 : 9, padding: besar ? "10px 12px" : "7px 9px",
       fontSize: besar ? 13 : 12.5, fontWeight: 700, lineHeight: 1.4, textAlign: "left",
     }}>
-      <Ico size={besar ? 16 : 14} style={{ flex: "0 0 auto", marginTop: 1 }} />
-      <span>{o.alasan}</span>
+      <Icon size={besar ? 16 : 14} style={{ flex: "0 0 auto", marginTop: 1 }} />
+      <span>{teks}</span>
     </div>
   );
 }
@@ -72,6 +80,8 @@ const pesanCustomer = (o) => {
     return o.eta
       ? `Halo Bapak/Ibu, update pesanan PO ${ref}: sebagian barang sudah siap, sisanya menyusul dengan perkiraan sekitar ${o.eta}. Mohon info apakah dikirim bertahap atau sekaligus.${akhir}`
       : `Halo Bapak/Ibu, update pesanan PO ${ref}: sebagian barang sudah siap, sisanya sedang kami siapkan. Mohon info apakah dikirim bertahap atau sekaligus.${akhir}`;
+  if (o.mandek)
+    return `Halo Bapak/Ibu, pesanan PO ${ref} sudah siap di gudang kami. Mohon konfirmasi jadwal pengiriman yang sesuai agar bisa segera kami kirim.${akhir}`;
   const inti = {
     2: "pesanan sedang kami proses",
     3: "barang sedang kami siapkan",
@@ -118,9 +128,12 @@ function OrderCard({ o, onOpen }) {
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: T.text, lineHeight: 1.25 }}>{o.customer || "—"}</div>
-        <div style={{ flex: "0 0 auto", display: "flex", gap: 5 }}>
+        <div style={{ flex: "0 0 auto", display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {o.gagal && (
             <span style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: T.danger, padding: "2px 7px", borderRadius: 20 }}>GAGAL</span>
+          )}
+          {o.mandek && (
+            <span style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: T.ungu, padding: "2px 7px", borderRadius: 20 }}>MANDEK</span>
           )}
           {o.overdue && (
             <span style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: T.danger, padding: "2px 7px", borderRadius: 20 }}>TELAT</span>
@@ -254,6 +267,7 @@ function Detail({ o, onClose, onToast }) {
             let sub = "";
             if (n === 3 && o.partial && o.partial.done < o.partial.tot && o.stage >= 3) sub = `Sebagian: ${o.partial.done} dari ${o.partial.tot} item`;
             if (n === 3 && cur && o.alasanTipe === "kosong") sub = o.eta ? `Menunggu stok masuk — perkiraan ${o.eta}` : "Menunggu stok masuk";
+            if (n === 3 && cur && o.mandek) sub = `Siap sejak ${o.aging} hari lalu — belum dijadwalkan`;
             if (n === 4 && o.scheduled) sub = `Rencana kirim: ${tglPanjang(o.scheduled)}`;
             return (
               <div key={i} style={{ display: "flex", gap: 12, minHeight: last ? 24 : 46 }}>
@@ -370,6 +384,7 @@ export default function SalesTracker() {
   const kpi = useMemo(() => ({
     aktif: orders.filter((o) => o.stage < 6).length,
     kendala: orders.filter((o) => o.gagal || o.belumReady).length,
+    mandek: orders.filter((o) => o.mandek).length,
     telat: orders.filter((o) => o.overdue).length,
     kirim: orders.filter((o) => o.stage === 5).length,
   }), [orders]);
@@ -385,6 +400,7 @@ export default function SalesTracker() {
     if (filter === "telat") list = list.filter((o) => o.overdue);
     else if (filter === "gagal") list = list.filter((o) => o.gagal);
     else if (filter === "belum") list = list.filter((o) => o.belumReady);
+    else if (filter === "mandek") list = list.filter((o) => o.mandek);
     else if (filter === "siap") list = list.filter((o) => o.alasanTipe === "siap");
     else if (filter === "proses") list = list.filter((o) => o.stage >= 2 && o.stage <= 3);
     else if (filter === "kirim") list = list.filter((o) => o.stage === 4 || o.stage === 5);
@@ -393,7 +409,7 @@ export default function SalesTracker() {
       const s = q.toLowerCase();
       list = list.filter((o) => (o.customer + " " + o.po + " " + o.ref).toLowerCase().includes(s));
     }
-    return [...list].sort((a, b) => (Number(!!b.gagal) - Number(!!a.gagal)) || (Number(!!b.belumReady) - Number(!!a.belumReady)) || (b.overdue - a.overdue) || (a.stage - b.stage) || (b.aging - a.aging));
+    return [...list].sort((a, b) => (Number(!!b.gagal) - Number(!!a.gagal)) || (Number(!!b.mandek) - Number(!!a.mandek)) || (Number(!!b.belumReady) - Number(!!a.belumReady)) || (b.overdue - a.overdue) || (a.stage - b.stage) || (b.aging - a.aging));
   }, [orders, filter, q, salesFilter, data]);
 
   /* ---- Layar login ---- */
@@ -427,6 +443,12 @@ export default function SalesTracker() {
   }
 
   /* ---- Layar utama ---- */
+  const judulKecil = data?.manager
+    ? (data?.tim && data.tim.length
+        ? `${data.rep || "Manajerial"} · ${data.tim.length} sales`
+        : "Manajerial · semua sales")
+    : data?.rep ? `Hai, ${data.rep}` : "Pesanan Saya";
+
   return (
     <div style={{ minHeight: "100vh", background: T.bg, maxWidth: 520, margin: "0 auto" }}>
       {/* Header */}
@@ -438,9 +460,7 @@ export default function SalesTracker() {
           <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, lineHeight: 1, letterSpacing: .5 }}>
             SALES TRACKER
           </div>
-          <div style={{ fontSize: 12, color: T.muted }}>
-            {data?.manager ? "Manajerial · semua sales" : data?.rep ? `Hai, ${data.rep}` : "Pesanan Saya"}
-          </div>
+          <div style={{ fontSize: 12, color: T.muted }}>{judulKecil}</div>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={() => load(token)} title="Muat ulang" style={iconBtn}>
@@ -458,16 +478,17 @@ export default function SalesTracker() {
         )}
 
         {/* KPI */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6, marginBottom: 14 }}>
           {[
             { n: kpi.aktif, l: "Aktif", c: T.text },
             { n: kpi.kendala, l: "Kendala", c: kpi.kendala ? T.danger : T.muted },
+            { n: kpi.mandek, l: "Mandek", c: kpi.mandek ? T.ungu : T.muted },
             { n: kpi.telat, l: "Telat", c: kpi.telat ? T.danger : T.muted },
             { n: kpi.kirim, l: "Dikirim", c: T.primary },
           ].map((k, i) => (
-            <div key={i} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 6px", textAlign: "center" }}>
-              <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 26, lineHeight: 1, color: k.c }}>{k.n}</div>
-              <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{k.l}</div>
+            <div key={i} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 4px", textAlign: "center" }}>
+              <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 24, lineHeight: 1, color: k.c }}>{k.n}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 3 }}>{k.l}</div>
             </div>
           ))}
         </div>
@@ -477,7 +498,7 @@ export default function SalesTracker() {
           <div style={{ marginBottom: 10 }}>
             <select value={salesFilter} onChange={(e) => setSalesFilter(e.target.value)}
               style={{ width: "100%", padding: "10px 12px", fontSize: 14, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, outline: "none", fontFamily: "inherit", fontWeight: 600 }}>
-              <option value="semua">Semua sales ({orders.length})</option>
+              <option value="semua">{data?.tim ? "Semua tim" : "Semua sales"} ({orders.length})</option>
               {salesmen.map((sm) => <option key={sm} value={sm}>{sm}</option>)}
             </select>
           </div>
@@ -494,7 +515,7 @@ export default function SalesTracker() {
 
         {/* Filter */}
         <div style={{ display: "flex", gap: 7, marginBottom: 14, overflowX: "auto", paddingBottom: 2 }}>
-          {[["semua", "Semua"], ["gagal", "Gagal"], ["belum", "Stok kosong"], ["siap", "Siap kirim"], ["telat", "Telat"], ["proses", "Proses"], ["kirim", "Dikirim"], ["selesai", "Selesai"]].map(([id, l]) => (
+          {[["semua", "Semua"], ["gagal", "Gagal"], ["mandek", "Mandek"], ["belum", "Stok kosong"], ["siap", "Siap kirim"], ["telat", "Telat"], ["proses", "Proses"], ["kirim", "Dikirim"], ["selesai", "Selesai"]].map(([id, l]) => (
             <button key={id} onClick={() => setFilter(id)} style={{
               flex: "0 0 auto", padding: "7px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
               border: `1px solid ${filter === id ? T.primary : T.border}`,
